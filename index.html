@@ -3,36 +3,68 @@
 <meta name="referrer" content="strict-origin-when-cross-origin">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Mi TV · reproductor</title>
-<style>html,body{margin:0;height:100%;background:#000;overflow:hidden}#p{width:100%;height:100%}</style>
+<style>
+html,body{margin:0;height:100%;background:#000;overflow:hidden;font-family:Arial,sans-serif;color:#fff}
+#p{width:100%;height:100%}
+#test{display:none;position:fixed;left:0;right:0;bottom:0;padding:10px;background:rgba(0,0,0,.75);font-size:14px}
+#test button{margin-right:6px}
+</style>
 </head><body>
 <div id="p"></div>
+<div id="test"><b>Prueba del puente de Mi TV</b> ·
+  <button onclick="run({cmd:'play',list:'PL4fGSI1pDJn6CW97F1vSZOkoU7k7VsYk9'})">Top 100 Colombia</button>
+  <button onclick="run({cmd:'resume'})">Play</button><button onclick="run({cmd:'pause'})">Pausa</button>
+  <button onclick="run({cmd:'next'})">Siguiente</button> <span id="st"></span></div>
 <script>
-/* Puente entre Mi TV (Samsung) y el reproductor oficial de YouTube.
-   Mi TV manda órdenes por postMessage: play/pause/resume/next/prev/stop.
-   Esta página devuelve el estado (canción, tiempo) para mostrar la letra. */
-var player = null, ready = false, queued = null, timer = 0;
-function send(m) { try { parent.postMessage(JSON.stringify(m), '*'); } catch (e) {} }
+/* Puente entre Mi TV (Samsung) y el reproductor oficial de YouTube (versión 3).
+   Órdenes por postMessage: play {list,index} / at {index} / pause / resume / next / prev / stop.
+   Devuelve: ready, state (canción y tiempo), list (ids de la lista), log, error. */
+var VERSION = 3, player = null, apiReady = false, queued = null, timer = 0, lastList = '', lastIds = '', watchdog = 0, mutedForAutoplay = false;
+var inFrame = window.parent !== window;
+function send(m) { m.v = VERSION; if (inFrame) { try { parent.postMessage(JSON.stringify(m), '*'); } catch (e) {} } else if (m.ev === 'log' || m.ev === 'error') { document.getElementById('st').textContent = m.msg || ('error ' + m.code); } }
+function log(msg) { send({ ev: 'log', msg: msg }); }
 function state() {
-  if (!player || !player.getVideoData) return;
-  var d = player.getVideoData() || {};
-  send({ ev: 'state', st: player.getPlayerState(), id: d.video_id, title: d.title, author: d.author,
-         t: player.getCurrentTime(), dur: player.getDuration() });
+  if (!player || !player.getPlayerState) return;
+  var d = player.getVideoData ? player.getVideoData() || {} : {};
+  var st = player.getPlayerState();
+  send({ ev: 'state', st: st, id: d.video_id, title: d.title, author: d.author, t: player.getCurrentTime(), dur: player.getDuration(),
+         index: player.getPlaylistIndex ? player.getPlaylistIndex() : -1 });
+  if (!inFrame) document.getElementById('st').textContent = 'estado ' + st + ' · ' + (d.title || '');
+  var ids = player.getPlaylist ? (player.getPlaylist() || []) : [];
+  if (ids.join() !== lastIds && ids.length) { lastIds = ids.join(); send({ ev: 'list', ids: ids.slice(0, 100), index: player.getPlaylistIndex() }); }
+  if (st === 1 && mutedForAutoplay) { mutedForAutoplay = false; setTimeout(function () { player.unMute(); player.setVolume(100); log('sonido activado'); }, 400); }
 }
-function onYouTubeIframeAPIReady() {
+function create(list, index) {
   player = new YT.Player('p', {
     width: '100%', height: '100%',
-    playerVars: { autoplay: 1, controls: 0, disablekb: 1, fs: 0, rel: 0, iv_load_policy: 3, playsinline: 1 },
+    playerVars: { listType: 'playlist', list: list, index: index || 0, autoplay: 1, controls: 0, disablekb: 1, fs: 0, rel: 0, iv_load_policy: 3, playsinline: 1 },
     events: {
-      onReady: function () { ready = true; send({ ev: 'ready' }); if (queued) { run(queued); queued = null; } },
+      onReady: function () { log('reproductor listo'); send({ ev: 'ready' }); player.playVideo(); arm(); },
       onStateChange: function () { state(); },
-      onError: function (e) { send({ ev: 'error', code: e.data }); }
+      onError: function (e) { log('error ' + e.data); send({ ev: 'error', code: e.data }); }
     }
   });
   clearInterval(timer); timer = setInterval(state, 1000);
 }
+/* Si a los 3 s no suena (bloqueo de reproducción automática), se intenta en silencio y luego se activa el sonido. */
+function arm() {
+  clearTimeout(watchdog);
+  watchdog = setTimeout(function () {
+    if (!player || player.getPlayerState() === 1) return;
+    log('no arrancó solo (estado ' + player.getPlayerState() + '): intento en silencio');
+    mutedForAutoplay = true; player.mute(); player.playVideo();
+  }, 3000);
+}
 function run(m) {
-  if (!ready) { queued = m; return; }
-  if (m.cmd === 'play') player.loadPlaylist({ list: m.list, listType: 'playlist', index: m.index || 0 });
+  if (!apiReady) { queued = m; return; }
+  if (m.cmd === 'play') {
+    lastList = m.list; lastIds = '';
+    log('lista ' + m.list);
+    if (!player) create(m.list, m.index); else { player.loadPlaylist({ list: m.list, listType: 'playlist', index: m.index || 0 }); arm(); }
+    return;
+  }
+  if (!player) return;
+  if (m.cmd === 'at') { player.playVideoAt(m.index || 0); arm(); }
   if (m.cmd === 'pause') player.pauseVideo();
   if (m.cmd === 'resume') player.playVideo();
   if (m.cmd === 'next') player.nextVideo();
@@ -40,11 +72,15 @@ function run(m) {
   if (m.cmd === 'stop') player.stopVideo();
   setTimeout(state, 300);
 }
+function onYouTubeIframeAPIReady() { apiReady = true; send({ ev: 'ready' }); log('API de YouTube cargada'); if (queued) { var q = queued; queued = null; run(q); } }
 window.addEventListener('message', function (e) {
   var m = e.data; if (typeof m === 'string') { try { m = JSON.parse(m); } catch (x) { return; } }
   if (m && m.cmd) run(m);
 });
-var s = document.createElement('script'); s.src = 'https://www.youtube.com/iframe_api'; document.head.appendChild(s);
+if (!inFrame) document.getElementById('test').style.display = 'block';
+var s = document.createElement('script'); s.src = 'https://www.youtube.com/iframe_api';
+s.onerror = function () { send({ ev: 'error', code: 'api' }); };
+document.head.appendChild(s);
 send({ ev: 'loaded' });
 </script>
 </body></html>
