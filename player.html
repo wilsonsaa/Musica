@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="es"><head><meta charset="utf-8">
+<meta name="referrer" content="strict-origin-when-cross-origin">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mi TV · reproductor</title>
+<style>html,body{margin:0;height:100%;background:#000;overflow:hidden}#p{width:100%;height:100%}</style>
+</head><body>
+<div id="p"></div>
+<script>
+/* Puente entre Mi TV (Samsung) y el reproductor oficial de YouTube.
+   Mi TV manda órdenes por postMessage: play/pause/resume/next/prev/stop.
+   Esta página devuelve el estado (canción, tiempo) para mostrar la letra. */
+var player = null, ready = false, queued = null, timer = 0;
+function send(m) { try { parent.postMessage(JSON.stringify(m), '*'); } catch (e) {} }
+function state() {
+  if (!player || !player.getVideoData) return;
+  var d = player.getVideoData() || {};
+  send({ ev: 'state', st: player.getPlayerState(), id: d.video_id, title: d.title, author: d.author,
+         t: player.getCurrentTime(), dur: player.getDuration() });
+}
+function onYouTubeIframeAPIReady() {
+  player = new YT.Player('p', {
+    width: '100%', height: '100%',
+    playerVars: { autoplay: 1, controls: 0, disablekb: 1, fs: 0, rel: 0, iv_load_policy: 3, playsinline: 1 },
+    events: {
+      onReady: function () { ready = true; send({ ev: 'ready' }); if (queued) { run(queued); queued = null; } },
+      onStateChange: function () { state(); },
+      onError: function (e) { send({ ev: 'error', code: e.data }); }
+    }
+  });
+  clearInterval(timer); timer = setInterval(state, 1000);
+}
+function run(m) {
+  if (!ready) { queued = m; return; }
+  if (m.cmd === 'play') player.loadPlaylist({ list: m.list, listType: 'playlist', index: m.index || 0 });
+  if (m.cmd === 'pause') player.pauseVideo();
+  if (m.cmd === 'resume') player.playVideo();
+  if (m.cmd === 'next') player.nextVideo();
+  if (m.cmd === 'prev') player.previousVideo();
+  if (m.cmd === 'stop') player.stopVideo();
+  setTimeout(state, 300);
+}
+window.addEventListener('message', function (e) {
+  var m = e.data; if (typeof m === 'string') { try { m = JSON.parse(m); } catch (x) { return; } }
+  if (m && m.cmd) run(m);
+});
+var s = document.createElement('script'); s.src = 'https://www.youtube.com/iframe_api'; document.head.appendChild(s);
+send({ ev: 'loaded' });
+</script>
+</body></html>
